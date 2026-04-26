@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,7 +31,7 @@ const (
 
 	// maxDrainFramesPerSession keeps one busy session from monopolizing a poll
 	// cycle when many short-lived sessions are active (e.g., chat apps).
-	maxDrainFramesPerSession = 4
+	maxDrainFramesPerSession = 8
 
 	// maxDrainFramesPerBatch bounds total frames sent in one poll request so
 	// very high session fan-out does not create oversized POST bodies.
@@ -40,13 +41,29 @@ const (
 	// a larger but still bounded batch to reduce queueing delay.
 	busySessionThreshold       = 24
 	maxDrainFramesPerBatchBusy = 144
+
+	// Hard cap for one relay response body to avoid spending CPU/memory on
+	// unexpectedly huge non-frame payloads (HTML error pages, quota pages, etc).
+	maxRelayResponseBodyBytes = 32 * 1024 * 1024
+
+	// Endpoint failure backoff to shed unhealthy deployments during quota spikes
+	// or tail-latency events without changing protocol behavior.
+	endpointBlacklistBaseTTL = 3 * time.Second
+	endpointBlacklistMaxTTL  = 48 * time.Second
+	endpointBlacklistMaxStep = 4
 )
 
 // Config bundles everything the carrier needs to talk to the relay.
 type Config struct {
-	ScriptURL string // full https://script.google.com/macros/s/.../exec URL
-	Fronting  FrontingConfig
-	AESKeyHex string // 64-char hex, must match server
+	ScriptURLs []string // one or more full https://script.google.com/macros/s/.../exec URLs
+	Fronting   FrontingConfig
+	AESKeyHex  string // 64-char hex, must match server
+}
+
+type relayEndpoint struct {
+	url             string
+	blacklistedTill time.Time
+	failCount       int
 }
 
 // Client owns the session map and the long-poll loop.
@@ -58,6 +75,10 @@ type Client struct {
 	mu       sync.Mutex
 	sessions map[[frame.SessionIDLen]byte]*session.Session
 
+	endpointMu   sync.Mutex
+	endpoints    []relayEndpoint
+	nextEndpoint int
+
 	kickCh chan struct{} // buffered len 1; coalesces OnTx wake-ups
 }
 
@@ -68,12 +89,31 @@ func New(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	endpoints := make([]relayEndpoint, 0, len(cfg.ScriptURLs))
+	seen := make(map[string]struct{}, len(cfg.ScriptURLs))
+	for _, raw := range cfg.ScriptURLs {
+		url := strings.TrimSpace(raw)
+		if url == "" {
+			continue
+		}
+		if _, ok := seen[url]; ok {
+			continue
+		}
+		seen[url] = struct{}{}
+		endpoints = append(endpoints, relayEndpoint{url: url})
+	}
+	if len(endpoints) == 0 {
+		return nil, fmt.Errorf("at least one script URL is required")
+	}
+
 	return &Client{
-		cfg:      cfg,
-		aead:     aead,
-		http:     NewFrontedClient(cfg.Fronting, pollTimeout),
-		sessions: make(map[[frame.SessionIDLen]byte]*session.Session),
-		kickCh:   make(chan struct{}, 1),
+		cfg:       cfg,
+		aead:      aead,
+		http:      NewFrontedClient(cfg.Fronting, pollTimeout),
+		sessions:  make(map[[frame.SessionIDLen]byte]*session.Session),
+		endpoints: endpoints,
+		kickCh:    make(chan struct{}, 1),
 	}, nil
 }
 
@@ -130,47 +170,165 @@ func (c *Client) pollOnce(ctx context.Context) bool {
 		return false
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.ScriptURL, bytes.NewReader(body))
-	if err != nil {
-		log.Printf("[carrier] failed to build relay request: %v", err)
-		return false
+	maxAttempts := 1
+	if len(c.endpoints) > 1 {
+		// One same-poll failover attempt keeps drained TX payload from being lost
+		// when one deployment intermittently fails under quota pressure.
+		maxAttempts = 2
 	}
-	req.Header.Set("Content-Type", "text/plain")
 
-	resp, err := c.http.Do(req)
-	if err != nil {
-		if ctx.Err() == nil {
-			log.Printf("[carrier] relay request failed: %v (check internet access, script_key, and google_host)", err)
-			time.Sleep(time.Second) // back off on transport errors
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		endpointIdx, scriptURL := c.pickRelayEndpoint()
+		if endpointIdx < 0 || scriptURL == "" {
+			log.Printf("[carrier] no relay script URLs are configured")
+			return false
 		}
-		return false
-	}
-	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("[carrier] failed to read relay response: %v", err)
-		return false
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, scriptURL, bytes.NewReader(body))
+		if err != nil {
+			log.Printf("[carrier] failed to build relay request: %v", err)
+			return false
+		}
+		req.Header.Set("Content-Type", "text/plain")
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return false
+			}
+			c.markEndpointFailure(endpointIdx)
+			if attempt < maxAttempts {
+				log.Printf("[carrier] relay request failed via %s (attempt %d/%d): %v; retrying alternate script", shortScriptKey(scriptURL), attempt, maxAttempts, err)
+				continue
+			}
+			log.Printf("[carrier] relay request failed via %s: %v (check internet access, script_key/script_keys, and google_host)", shortScriptKey(scriptURL), err)
+			time.Sleep(time.Second) // back off on transport errors
+			return false
+		}
+
+		respBody, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			c.markEndpointFailure(endpointIdx)
+			if attempt < maxAttempts {
+				log.Printf("[carrier] failed to read relay response via %s (attempt %d/%d): %v; retrying alternate script", shortScriptKey(scriptURL), attempt, maxAttempts, readErr)
+				continue
+			}
+			log.Printf("[carrier] failed to read relay response: %v", readErr)
+			return false
+		}
+
+		if resp.StatusCode == http.StatusNoContent || len(respBody) == 0 {
+			c.markEndpointSuccess(endpointIdx)
+			return len(frames) > 0
+		}
+		if resp.StatusCode != http.StatusOK {
+			c.markEndpointFailure(endpointIdx)
+			if attempt < maxAttempts {
+				log.Printf("[carrier] relay returned HTTP %d via %s (attempt %d/%d); retrying alternate script", resp.StatusCode, shortScriptKey(scriptURL), attempt, maxAttempts)
+				continue
+			}
+			log.Printf("[carrier] relay returned HTTP %d via %s (verify Apps Script deployment is live and access is set to Anyone)", resp.StatusCode, shortScriptKey(scriptURL))
+			return false
+		}
+		if len(respBody) > maxRelayResponseBodyBytes {
+			c.markEndpointFailure(endpointIdx)
+			if attempt < maxAttempts {
+				log.Printf("[carrier] relay response too large via %s (attempt %d/%d); retrying alternate script", shortScriptKey(scriptURL), attempt, maxAttempts)
+				continue
+			}
+			log.Printf("[carrier] relay response too large via %s (%d bytes > %d); dropping batch to protect stability", shortScriptKey(scriptURL), len(respBody), maxRelayResponseBodyBytes)
+			return len(frames) > 0
+		}
+		if isLikelyNonBatchRelayPayload(respBody) {
+			c.markEndpointFailure(endpointIdx)
+			if attempt < maxAttempts {
+				log.Printf("[carrier] relay returned non-batch payload via %s (attempt %d/%d); retrying alternate script", shortScriptKey(scriptURL), attempt, maxAttempts)
+				continue
+			}
+			log.Printf("[carrier] relay returned non-batch payload via %s (likely HTML/JSON error page), dropping response", shortScriptKey(scriptURL))
+			return len(frames) > 0
+		}
+
+		rxFrames, decodeErr := frame.DecodeBatch(c.aead, respBody)
+		if decodeErr != nil {
+			c.markEndpointFailure(endpointIdx)
+			if attempt < maxAttempts {
+				log.Printf("[carrier] relay response was invalid via %s (attempt %d/%d): %v; retrying alternate script", shortScriptKey(scriptURL), attempt, maxAttempts, decodeErr)
+				continue
+			}
+			log.Printf("[carrier] relay response was invalid via %s (possibly HTML/error page instead of encrypted data): %v", shortScriptKey(scriptURL), decodeErr)
+			return len(frames) > 0
+		}
+
+		for _, f := range rxFrames {
+			c.routeRx(f)
+		}
+		c.markEndpointSuccess(endpointIdx)
+		return len(frames) > 0 || len(rxFrames) > 0
 	}
 
-	if resp.StatusCode == http.StatusNoContent || len(respBody) == 0 {
-		return len(frames) > 0
+	return false
+}
+
+func (c *Client) pickRelayEndpoint() (int, string) {
+	c.endpointMu.Lock()
+	defer c.endpointMu.Unlock()
+
+	n := len(c.endpoints)
+	if n == 0 {
+		return -1, ""
 	}
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("[carrier] relay returned HTTP %d (verify Apps Script deployment is live and access is set to Anyone)", resp.StatusCode)
-		return false
+	now := time.Now()
+	start := c.nextEndpoint % n
+	for i := 0; i < n; i++ {
+		idx := (start + i) % n
+		ep := c.endpoints[idx]
+		if !ep.blacklistedTill.After(now) {
+			c.nextEndpoint = (idx + 1) % n
+			return idx, ep.url
+		}
 	}
 
-	rxFrames, err := frame.DecodeBatch(c.aead, respBody)
-	if err != nil {
-		log.Printf("[carrier] relay response was invalid (possibly HTML/error page instead of encrypted data): %v", err)
-		return len(frames) > 0
+	chosen := 0
+	soonest := c.endpoints[0].blacklistedTill
+	for i := 1; i < n; i++ {
+		if c.endpoints[i].blacklistedTill.Before(soonest) {
+			chosen = i
+			soonest = c.endpoints[i].blacklistedTill
+		}
 	}
+	c.nextEndpoint = (chosen + 1) % n
+	return chosen, c.endpoints[chosen].url
+}
 
-	for _, f := range rxFrames {
-		c.routeRx(f)
+func (c *Client) markEndpointSuccess(endpointIdx int) {
+	c.endpointMu.Lock()
+	defer c.endpointMu.Unlock()
+	if endpointIdx < 0 || endpointIdx >= len(c.endpoints) {
+		return
 	}
-	return len(frames) > 0 || len(rxFrames) > 0
+	c.endpoints[endpointIdx].failCount = 0
+	c.endpoints[endpointIdx].blacklistedTill = time.Time{}
+}
+
+func (c *Client) markEndpointFailure(endpointIdx int) {
+	c.endpointMu.Lock()
+	defer c.endpointMu.Unlock()
+	if endpointIdx < 0 || endpointIdx >= len(c.endpoints) {
+		return
+	}
+	ep := &c.endpoints[endpointIdx]
+	ep.failCount++
+	step := ep.failCount - 1
+	if step > endpointBlacklistMaxStep {
+		step = endpointBlacklistMaxStep
+	}
+	ttl := endpointBlacklistBaseTTL << step
+	if ttl > endpointBlacklistMaxTTL {
+		ttl = endpointBlacklistMaxTTL
+	}
+	ep.blacklistedTill = time.Now().Add(ttl)
 }
 
 func (c *Client) drainAll() []*frame.Frame {
@@ -202,7 +360,7 @@ func (c *Client) routeRx(f *frame.Frame) {
 	s, ok := c.sessions[f.SessionID]
 	c.mu.Unlock()
 	if !ok {
-		return // unknown session — drop
+		return // unknown session - drop
 	}
 	s.ProcessRx(f)
 }
@@ -223,4 +381,34 @@ func (c *Client) kick() {
 	case c.kickCh <- struct{}{}:
 	default:
 	}
+}
+
+func isLikelyNonBatchRelayPayload(body []byte) bool {
+	t := bytes.TrimSpace(body)
+	if len(t) == 0 {
+		return false
+	}
+	l := bytes.ToLower(t)
+	if bytes.HasPrefix(l, []byte("<!doctype")) || bytes.HasPrefix(l, []byte("<html")) {
+		return true
+	}
+	// Base64 batches never begin with JSON object/array delimiters or raw HTTP.
+	if t[0] == '{' || t[0] == '[' || bytes.HasPrefix(t, []byte("HTTP/")) {
+		return true
+	}
+	return false
+}
+
+func shortScriptKey(scriptURL string) string {
+	parts := strings.Split(strings.Trim(scriptURL, "/"), "/")
+	for i := 0; i < len(parts)-1; i++ {
+		if parts[i] == "s" {
+			id := parts[i+1]
+			if len(id) > 14 {
+				return id[:6] + "..." + id[len(id)-6:]
+			}
+			return id
+		}
+	}
+	return "(unknown)"
 }

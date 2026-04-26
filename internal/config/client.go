@@ -15,10 +15,10 @@ import (
 // Client is the relay-tunnel client config.
 type Client struct {
 	ListenAddr string
-	GoogleIP   string // "ip:port"
-	SNIHost    string // e.g. "www.google.com"
-	ScriptURL  string // https://script.google.com/macros/s/.../exec
-	AESKeyHex  string // 64-char hex
+	GoogleIP   string   // "ip:port"
+	SNIHost    string   // e.g. "www.google.com"
+	ScriptURLs []string // one or more https://script.google.com/macros/s/.../exec URLs
+	AESKeyHex  string   // 64-char hex
 }
 
 // clientFile is the user-friendly client config format.
@@ -34,7 +34,8 @@ type clientFile struct {
 	SNI string `json:"sni"`
 
 	// Apps Script deployment key only.
-	ScriptKey string `json:"script_key"`
+	ScriptKey  string   `json:"script_key"`
+	ScriptKeys []string `json:"script_keys"`
 
 	// Shared AES key (64-char hex).
 	TunnelKey string `json:"tunnel_key"`
@@ -81,6 +82,27 @@ func normalizeDeploymentID(v string) string {
 	return v
 }
 
+func buildScriptURL(deploymentID string) string {
+	return fmt.Sprintf("https://script.google.com/macros/s/%s/exec", deploymentID)
+}
+
+func dedupeStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
 // LoadClient reads and validates a client config file.
 func LoadClient(path string) (*Client, error) {
 	b, err := os.ReadFile(path)
@@ -105,9 +127,18 @@ func LoadClient(path string) (*Client, error) {
 	googleHost := firstNonEmpty(f.GoogleHost, "216.239.38.120")
 	googlePort := 443
 
-	deploymentID := normalizeDeploymentID(f.ScriptKey)
-	if deploymentID == "" {
-		return nil, fmt.Errorf("config: script_key is required")
+	deploymentIDs := make([]string, 0, 1+len(f.ScriptKeys))
+	if deploymentID := normalizeDeploymentID(f.ScriptKey); deploymentID != "" {
+		deploymentIDs = append(deploymentIDs, deploymentID)
+	}
+	for _, raw := range f.ScriptKeys {
+		if deploymentID := normalizeDeploymentID(raw); deploymentID != "" {
+			deploymentIDs = append(deploymentIDs, deploymentID)
+		}
+	}
+	deploymentIDs = dedupeStrings(deploymentIDs)
+	if len(deploymentIDs) == 0 {
+		return nil, fmt.Errorf("config: script_key or script_keys is required")
 	}
 
 	key := strings.TrimSpace(f.TunnelKey)
@@ -119,11 +150,16 @@ func LoadClient(path string) (*Client, error) {
 		return nil, fmt.Errorf("config: tunnel_key must be valid 64-char hex AES-256 key")
 	}
 
+	scriptURLs := make([]string, 0, len(deploymentIDs))
+	for _, deploymentID := range deploymentIDs {
+		scriptURLs = append(scriptURLs, buildScriptURL(deploymentID))
+	}
+
 	c := Client{
 		ListenAddr: net.JoinHostPort(listenHost, strconv.Itoa(listenPort)),
 		GoogleIP:   net.JoinHostPort(googleHost, strconv.Itoa(googlePort)),
 		SNIHost:    firstNonEmpty(f.SNI, "www.google.com"),
-		ScriptURL:  fmt.Sprintf("https://script.google.com/macros/s/%s/exec", deploymentID),
+		ScriptURLs: scriptURLs,
 		AESKeyHex:  key,
 	}
 	return &c, nil

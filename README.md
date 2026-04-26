@@ -12,7 +12,7 @@ A SOCKS5 VPN that tunnels **raw TCP** through a Google Apps Script web app to yo
 
 ## Important Notes
 
-- Never share `aes_key_hex` with anyone. Anyone with this key can use your tunnel/VPS as if they are you.
+- Never share `tunnel_key` with anyone. Anyone with this key can use your tunnel/VPS as if they are you.
 - A server with public internet access is required. Your exit server must be reachable from Google Apps Script.
 - Each Google Apps Script deployment ID has a quota of about 20,000 executions per day, and the quota resets around 10:30 AM Iran time (GMT+3:30).
 - You do not need to install a local MITM certificate in this project. The certificate setup in `MasterHttpRelayVPN` is for that project's architecture and is not required here.
@@ -87,7 +87,7 @@ cp client_config.example.json client_config.json
 cp server_config.example.json   server_config.json
 ```
 
-Open both and paste the AES hex string into `tunnel_key` (client) and `aes_key_hex` (server). Leave `script_key` blank for now — you'll fill it in after Step 5.
+Open both and paste the AES hex string into `tunnel_key` (client) and `tunnel_key` (server). Leave `script_key` blank for now - you'll fill it in after Step 5.
 
 `client_config.json`:
 
@@ -98,6 +98,7 @@ Open both and paste the AES hex string into `tunnel_key` (client) and `aes_key_h
   "google_host": "216.239.38.120",
   "sni":         "www.google.com",
   "script_key":  "PASTE_DEPLOYMENT_ID_ONLY",
+  "script_keys": ["OPTIONAL_SECOND_DEPLOYMENT_ID", "OPTIONAL_THIRD_DEPLOYMENT_ID"],
   "tunnel_key":  "PASTE_OUTPUT_OF_GEN_KEY"
 }
 ```
@@ -106,8 +107,9 @@ Open both and paste the AES hex string into `tunnel_key` (client) and `aes_key_h
 
 ```json
 {
-  "listen_addr": "0.0.0.0:8443",
-  "aes_key_hex": "SAME_VALUE_AS_CLIENT"
+  "server_host": "0.0.0.0",
+  "server_port": 8443,
+  "tunnel_key":  "SAME_VALUE_AS_CLIENT"
 }
 ```
 
@@ -128,9 +130,9 @@ This is the dumb pipe that disguises your traffic as Google.
    - **Execute as:** Me
    - **Who has access:** Anyone
 8. Click **Deploy** and copy the deployment ID from the `/exec` URL (the part between `/s/` and `/exec`).
-9. Paste that value into `script_key` in `client_config.json`.
+9. Paste that value into `script_key` in `client_config.json`. If you deploy multiple scripts, put extra IDs in `script_keys`.
 
-> ⚠️ **Editing the script doesn't update the live version.** Every time you change `Code.gs` you must create a **new deployment** and update `script_key` in your client config.
+> ⚠️ **Editing the script doesn't update the live version.** Every time you change `Code.gs` you must create a **new deployment** and update `script_key`/`script_keys` in your client config.
 
 Verify the deployment:
 
@@ -201,21 +203,23 @@ By default the client listens on `127.0.0.1:1080` so only your computer can use 
 | `socks_port` | `1080` | Port for the local SOCKS5 listener. |
 | `google_host` | `216.239.38.120` | Google edge IP/host to dial (port is fixed to `443`). |
 | `sni` | `www.google.com` | SNI presented during TLS handshake. |
-| `script_key` | — | Your Apps Script deployment ID only (no full URL needed). |
+| `script_key` | — | Primary Apps Script deployment ID (no full URL needed). |
+| `script_keys` | — | Optional extra deployment IDs for health-aware load balancing and quota spreading. |
 | `tunnel_key` | — | 64-char hex AES-256 key. Must match the server byte-for-byte. |
 
 ### Server (`server_config.json`)
 
 | Field | Default | What it does |
 |---|---|---|
-| `listen_addr` | `0.0.0.0:8443` | Where the exit server's HTTP handler binds. Must be reachable from Google's network. |
-| `aes_key_hex` | — | 64-char hex AES-256 key. Must match the client. |
+| `server_host` | `0.0.0.0` | Host/IP where the exit server binds. |
+| `server_port` | `8443` | Port where the exit server listens. Must be reachable from Google's network. |
+| `tunnel_key` | — | 64-char hex AES-256 key. Must match the client. |
 
 ---
 
 ## Updating the Apps Script forwarder
 
-If you change `Code.gs` — for example to point at a new droplet IP — you must create a **new deployment** in the Apps Script editor (Deploy → **New deployment**, not just "Manage deployments"). Saving alone does nothing; the live `/exec` URL serves the published version. After redeploying, update `script_key` in `client_config.json`.
+If you change `Code.gs` - for example to point at a new droplet IP - you must create a **new deployment** in the Apps Script editor (Deploy -> **New deployment**, not just "Manage deployments"). Saving alone does nothing; the live `/exec` URL serves the published version. After redeploying, update `script_key`/`script_keys` in `client_config.json`.
 
 ---
 
@@ -275,7 +279,7 @@ relay-tunnel/
 
 | Problem | Solution |
 |---|---|
-| `decode batch: illegal base64 data at input byte 0` | Apps Script returned an HTML page instead of an encrypted batch. Either `script_url` doesn't point at a live deployment, or **Who has access** isn't set to `Anyone`. Re-deploy (Deploy → **New deployment**) and copy the new `/exec` URL into `client_config.json`. |
+| `decode batch: illegal base64 data at input byte 0` | Apps Script returned an HTML page instead of an encrypted batch. Either `script_key`/`script_keys` does not point at a live deployment, or **Who has access** is not set to `Anyone`. Re-deploy (Deploy -> **New deployment**) and update `script_key`/`script_keys` in `client_config.json`. |
 | `[carrier] non-OK status: 404` | Same root cause as above — the `/exec` URL isn't live. Re-deploy. |
 | `[carrier] non-OK status: 500` | Apps Script can't reach `DO_URL`. Check the IP in `Code.gs`, confirm the VPS is up, and confirm inbound TCP/8443 is open. `curl http://your.vps.ip:8443/healthz` should return 200. |
 | `[carrier] post: ... timeout` | Fronted connection to Google is failing. Try a different `google_ip` — any 216.239.x.120 served by Google works. |
@@ -284,7 +288,7 @@ relay-tunnel/
 | Cloudflare-protected sites show captchas | Expected. Your VPS's IP is on a datacenter ASN (DigitalOcean = AS14061), which Cloudflare's bot scoring flags. Not a tunnel bug. |
 | YouTube buffers a lot at 1080p | Expected. The tunnel adds ~300-800ms per round trip due to Apps Script dispatch overhead. 480p is comfortable. |
 | Apps Script quota exhausted | Each free Google account gets ~20,000 `UrlFetchApp` calls per 24h. Heavy usage hits this. Wait until quota resets at midnight Pacific time (10:30 AM Iran time) or deploy under a second account. |
-| Mismatched AES keys | Symptom: client logs no errors but no traffic flows; VPS logs `dial ...` lines never appear. Confirm `aes_key_hex` is byte-identical in both configs. |
+| Mismatched AES keys | Symptom: client logs no errors but no traffic flows; VPS logs `dial ...` lines never appear. Confirm `tunnel_key` is byte-identical in both configs. |
 
 ---
 
@@ -294,7 +298,7 @@ relay-tunnel/
 - **Generate a fresh key with `scripts/gen-key.sh`** for every deployment. Don't reuse keys across hosts.
 - **AES-GCM is the only authentication.** There's no password, no rate-limiting, no per-user accounting. Treat the key like a server-admin password.
 - **Apps Script logs every `doPost` invocation** in Google's dashboard (count and duration only — Apps Script never sees plaintext).
-- **Keep `listen_addr` on the client at `127.0.0.1`** unless you specifically want LAN sharing.
+- **Keep `socks_host` on the client at `127.0.0.1`** unless you specifically want LAN sharing.
 - **Each Apps Script deployment is rate-limited to ~20,000 calls/day** on free Google accounts.
 
 ---

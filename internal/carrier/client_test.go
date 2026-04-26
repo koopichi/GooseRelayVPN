@@ -60,8 +60,8 @@ func TestCarrier_RoundTripEcho(t *testing.T) {
 	defer srv.Close()
 
 	c, err := New(Config{
-		ScriptURL: srv.URL,
-		AESKeyHex: testKeyHex,
+		ScriptURLs: []string{srv.URL},
+		AESKeyHex:  testKeyHex,
 	})
 	if err != nil {
 		t.Fatalf("new client: %v", err)
@@ -114,7 +114,7 @@ func TestCarrier_UnknownSessionFramesDropped(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c, err := New(Config{ScriptURL: srv.URL, AESKeyHex: testKeyHex})
+	c, err := New(Config{ScriptURLs: []string{srv.URL}, AESKeyHex: testKeyHex})
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -125,4 +125,94 @@ func TestCarrier_UnknownSessionFramesDropped(t *testing.T) {
 	// Just let it run a couple of poll cycles. A panic / data race here is
 	// the failure mode; the assertion is "doesn't crash."
 	time.Sleep(200 * time.Millisecond)
+}
+
+func TestCarrier_PollOnceDropsNonBatchPayload(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<!doctype html><html><body>quota exceeded</body></html>"))
+	}))
+	defer srv.Close()
+
+	c, err := New(Config{ScriptURLs: []string{srv.URL}, AESKeyHex: testKeyHex})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	c.http = srv.Client()
+
+	if didWork := c.pollOnce(context.Background()); didWork {
+		t.Fatal("expected no work for non-batch relay payload")
+	}
+}
+
+func TestIsLikelyNonBatchRelayPayload(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []byte
+		want bool
+	}{
+		{name: "html", in: []byte("<html>oops</html>"), want: true},
+		{name: "doctype", in: []byte("<!DOCTYPE html>"), want: true},
+		{name: "json", in: []byte(`{"e":"quota"}`), want: true},
+		{name: "http", in: []byte("HTTP/1.1 502 Bad Gateway"), want: true},
+		{name: "base64ish", in: []byte("QUJDRA=="), want: false},
+		{name: "empty", in: []byte(" \r\n\t "), want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isLikelyNonBatchRelayPayload(tc.in); got != tc.want {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCarrier_FailsOverToHealthyScriptURLWithoutTxLoss(t *testing.T) {
+	aead, err := frame.NewCryptoFromHexKey(testKeyHex)
+	if err != nil {
+		t.Fatalf("crypto: %v", err)
+	}
+
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("quota"))
+	}))
+	defer badSrv.Close()
+
+	goodSrv, _ := echoServer(t, aead)
+	defer goodSrv.Close()
+
+	c, err := New(Config{ScriptURLs: []string{badSrv.URL, goodSrv.URL}, AESKeyHex: testKeyHex})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		_ = c.Run(ctx)
+		close(done)
+	}()
+
+	s := c.NewSession("example.com:80")
+	s.EnqueueTx([]byte("hello-failover"))
+
+	select {
+	case got := <-s.RxChan:
+		if string(got) != "hello-failover" {
+			t.Fatalf("got %q want %q", got, "hello-failover")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for failover response")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return after cancel")
+	}
 }

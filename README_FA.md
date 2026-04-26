@@ -12,7 +12,7 @@
 
 ## نکات مهم
 
-- کلید `aes_key_hex` را هرگز با کسی به اشتراک نگذارید. هر کسی این کلید را داشته باشد می‌تواند مثل شما از تونل/VPS استفاده کند.
+- کلید `tunnel_key` را هرگز با کسی به اشتراک نگذارید. هر کسی این کلید را داشته باشد می‌تواند مثل شما از تونل/VPS استفاده کند.
 - داشتن یک سرور با دسترسی اینترنت عمومی الزامی است. سرور خروجی شما باید از سمت Google Apps Script قابل دسترسی باشد.
 - هر Deployment ID در Google Apps Script حدود ۲۰٬۰۰۰ اجرا در روز سهمیه دارد و این سهمیه حدود ساعت ۱۰:۳۰ صبح به وقت ایران (GMT+3:30) ریست می‌شود.
 - در این پروژه نیازی به نصب گواهی (certificate) مثل `MasterHttpRelayVPN` ندارید. مدل فنی آن پروژه متفاوت است و اینجا لازم نیست.
@@ -87,7 +87,7 @@ cp client_config.example.json client_config.json
 cp server_config.example.json   server_config.json
 ```
 
-هر دو را باز کنید و رشته‌ی hex را در فیلد `tunnel_key` (در کلاینت) و `aes_key_hex` (در سرور) قرار دهید. مقدار `script_key` را فعلاً خالی بگذارید — بعد از مرحله‌ی ۵ آن را پر می‌کنید.
+هر دو را باز کنید و رشته‌ی hex را در فیلد `tunnel_key` (در کلاینت) و `tunnel_key` (در سرور) قرار دهید. مقدار `script_key` را فعلاً خالی بگذارید — بعد از مرحله‌ی ۵ آن را پر می‌کنید.
 
 `client_config.json`:
 
@@ -98,6 +98,7 @@ cp server_config.example.json   server_config.json
   "google_host": "216.239.38.120",
   "sni":         "www.google.com",
   "script_key":  "PASTE_DEPLOYMENT_ID_ONLY",
+  "script_keys": ["OPTIONAL_SECOND_DEPLOYMENT_ID", "OPTIONAL_THIRD_DEPLOYMENT_ID"],
   "tunnel_key":  "PASTE_OUTPUT_OF_GEN_KEY"
 }
 ```
@@ -106,8 +107,9 @@ cp server_config.example.json   server_config.json
 
 ```json
 {
-  "listen_addr": "0.0.0.0:8443",
-  "aes_key_hex": "SAME_VALUE_AS_CLIENT"
+  "server_host": "0.0.0.0",
+  "server_port": 8443,
+  "tunnel_key": "SAME_VALUE_AS_CLIENT"
 }
 ```
 
@@ -128,9 +130,9 @@ cp server_config.example.json   server_config.json
    - **Execute as:** Me
    - **Who has access:** Anyone
 8. روی **Deploy** بزنید و Deployment ID را از آدرس `/exec` بردارید (بخشی که بین `/s/` و `/exec` است).
-9. این مقدار را در فیلد `script_key` فایل `client_config.json` paste کنید.
+9. این مقدار را در فیلد `script_key` فایل `client_config.json` paste کنید. اگر چند deployment دارید، بقیه را در `script_keys` قرار دهید.
 
-> ⚠️ **ویرایش اسکریپت، نسخه‌ی فعال را به‌روزرسانی نمی‌کند.** هر بار که `Code.gs` را تغییر می‌دهید باید **یک deployment جدید** بسازید و `script_key` را در کانفیگ کلاینت به‌روزرسانی کنید.
+> ⚠️ **ویرایش اسکریپت، نسخه‌ی فعال را به‌روزرسانی نمی‌کند.** هر بار که `Code.gs` را تغییر می‌دهید باید **یک deployment جدید** بسازید و `script_key`/`script_keys` را در کانفیگ کلاینت به‌روزرسانی کنید.
 
 تست deployment:
 
@@ -201,21 +203,23 @@ curl -x socks5h://127.0.0.1:1080 https://api.ipify.org
 | `socks_port` | `1080` | پورت SOCKS5 محلی. |
 | `google_host` | `216.239.38.120` | میزبان/IP لبه‌ی گوگل برای اتصال (پورت همیشه `443` است). |
 | `sni` | `www.google.com` | مقدار SNI در handshake TLS. |
-| `script_key` | — | فقط Deployment ID مربوط به Apps Script (بدون URL کامل). |
+| `script_key` | — | Deployment ID اصلی Apps Script (بدون URL کامل). |
+| `script_keys` | — | Deployment IDهای اضافه برای load balancing سلامت‌محور و پخش quota. |
 | `tunnel_key` | — | کلید AES-256 به‌صورت hex (۶۴ کاراکتر) که باید با سرور یکسان باشد. |
 
 ### سرور (`server_config.json`)
 
 | فیلد | مقدار پیش‌فرض | توضیح |
 |---|---|---|
-| `listen_addr` | `0.0.0.0:8443` | محل bind شدن HTTP handler سرور خروجی. باید از شبکه‌ی گوگل قابل دسترسی باشد. |
-| `aes_key_hex` | — | کلید AES-256 به‌صورت hex. باید با کلاینت یکسان باشد. |
+| `server_host` | `0.0.0.0` | میزبان/IP که سرور خروجی روی آن bind می‌شود. |
+| `server_port` | `8443` | پورتی که سرور خروجی روی آن گوش می‌دهد. باید از شبکه‌ی گوگل قابل دسترسی باشد. |
+| `tunnel_key` | — | کلید AES-256 به‌صورت hex. باید با کلاینت یکسان باشد. |
 
 ---
 
 ## به‌روزرسانی forwarder روی Apps Script
 
-اگر `Code.gs` را تغییر دادید — مثلاً برای تغییر IP دراپلت — باید در ویرایشگر Apps Script یک **deployment جدید** بسازید (Deploy → **New deployment**، نه فقط "Manage deployments"). صرفاً ذخیره کردن کد، نسخه‌ی فعال را عوض نمی‌کند؛ آدرس `/exec` همچنان نسخه‌ی منتشرشده‌ی قبلی را سرو می‌کند. بعد از deploy جدید، `script_key` را در `client_config.json` به‌روزرسانی کنید.
+اگر `Code.gs` را تغییر دادید — مثلاً برای تغییر IP دراپلت — باید در ویرایشگر Apps Script یک **deployment جدید** بسازید (Deploy → **New deployment**، نه فقط "Manage deployments"). صرفاً ذخیره کردن کد، نسخه‌ی فعال را عوض نمی‌کند؛ آدرس `/exec` همچنان نسخه‌ی منتشرشده‌ی قبلی را سرو می‌کند. بعد از deploy جدید، `script_key`/`script_keys` را در `client_config.json` به‌روزرسانی کنید.
 
 ---
 
@@ -275,7 +279,7 @@ relay-tunnel/
 
 | مشکل | راه‌حل |
 |---|---|
-| `decode batch: illegal base64 data at input byte 0` | Apps Script به‌جای batch رمزشده، یک صفحه‌ی HTML برگردانده. یا `script_url` به deployment زنده اشاره نمی‌کند، یا گزینه‌ی **Who has access** روی `Anyone` تنظیم نشده. یک **deployment جدید** بسازید و آدرس `/exec` جدید را در `client_config.json` قرار دهید. |
+| `decode batch: illegal base64 data at input byte 0` | Apps Script به‌جای batch رمزشده، یک صفحه‌ی HTML برگردانده. یا `script_key`/`script_keys` به deployment زنده اشاره نمی‌کند، یا گزینه‌ی **Who has access** روی `Anyone` تنظیم نشده. یک **deployment جدید** بسازید و `script_key`/`script_keys` را در `client_config.json` به‌روزرسانی کنید. |
 | `[carrier] non-OK status: 404` | همان مشکل بالا — آدرس `/exec` زنده نیست. دوباره deploy کنید. |
 | `[carrier] non-OK status: 500` | Apps Script نمی‌تواند به `DO_URL` برسد. IP داخل `Code.gs` را چک کنید، اطمینان حاصل کنید VPS بالا است و TCP/8443 ورودی باز است. `curl http://your.vps.ip:8443/healthz` باید 200 برگرداند. |
 | `[carrier] post: ... timeout` | اتصال fronted به گوگل fail می‌شود. یک `google_ip` دیگر امتحان کنید — هر 216.239.x.120 که گوگل سرویس می‌دهد کار می‌کند. |
@@ -284,7 +288,7 @@ relay-tunnel/
 | سایت‌های پشت Cloudflare کپچا می‌خواهند | طبیعی است. IP دراپلت شما روی ASN دیتاسنتر است (DigitalOcean = AS14061) و bot scoring کلودفلر آن را علامت می‌زند. این مشکل تونل نیست. |
 | یوتیوب در ۱۰۸۰p بافر می‌کند | طبیعی است. تونل به‌خاطر overhead فراخوانی Apps Script حدود ۳۰۰–۸۰۰ میلی‌ثانیه به هر round trip اضافه می‌کند. کیفیت ۴۸۰p روان است. |
 | سهمیه‌ی Apps Script تمام شده | هر حساب گوگل رایگان روزانه ~۲۰٬۰۰۰ فراخوانی `UrlFetchApp` دارد. منتظر reset سهمیه در نیمه‌شب به وقت Pacific (~۱۰:۳۰ صبح به وقت ایران) بمانید یا با یک حساب دوم deploy کنید. |
-| کلیدهای AES ناهمسان | علامت: کلاینت خطا نمی‌دهد ولی هیچ ترافیکی رد نمی‌شود؛ خطوط `dial ...` در لاگ سرور ظاهر نمی‌شوند. مطمئن شوید مقدار `aes_key_hex` در دو کانفیگ بایت‌به‌بایت یکسان است. |
+| کلیدهای AES ناهمسان | علامت: کلاینت خطا نمی‌دهد ولی هیچ ترافیکی رد نمی‌شود؛ خطوط `dial ...` در لاگ سرور ظاهر نمی‌شوند. مطمئن شوید مقدار `tunnel_key` در دو کانفیگ بایت‌به‌بایت یکسان است. |
 
 ---
 
@@ -294,7 +298,7 @@ relay-tunnel/
 - **برای هر deployment کلید جدید با `scripts/gen-key.sh` بسازید.** کلید را بین چند سرور به اشتراک نگذارید.
 - **AES-GCM تنها مکانیزم احراز هویت است.** هیچ رمز عبور، rate-limiting یا حسابداری per-user وجود ندارد. کلید را مثل پسورد ادمین سرور حفظ کنید.
 - **Apps Script هر فراخوانی `doPost` را در داشبورد گوگل لاگ می‌کند** (فقط تعداد و duration — Apps Script هرگز محتوای خام را نمی‌بیند).
-- **مقدار `listen_addr` کلاینت را روی `127.0.0.1` نگه دارید** مگر اینکه واقعاً قصد اشتراک LAN داشته باشید.
+- **مقدار `socks_host` کلاینت را روی `127.0.0.1` نگه دارید** مگر اینکه واقعاً قصد اشتراک LAN داشته باشید.
 - **هر deployment روی Apps Script محدودیت ~۲۰٬۰۰۰ فراخوانی در روز** روی حساب رایگان گوگل دارد.
 
 ---

@@ -4,5 +4,9 @@
   "google_host": "216.239.38.120",
   "sni": "www.google.com",
   "script_key": "REPLACE_WITH_DEPLOYMENT_ID_ONLY",
+  "script_keys": [
+    "OPTIONAL_SECOND_DEPLOYMENT_ID",
+    "OPTIONAL_THIRD_DEPLOYMENT_ID"
+  ],
   "tunnel_key": "REPLACE_WITH_OUTPUT_OF_scripts_gen-key.sh"
 }

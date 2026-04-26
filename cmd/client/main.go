@@ -89,6 +89,24 @@ func shortScriptKey(scriptURL string) string {
 	return "(unknown)"
 }
 
+func summarizeScriptURLs(scriptURLs []string) string {
+	if len(scriptURLs) == 0 {
+		return "(none)"
+	}
+	maxShown := len(scriptURLs)
+	if maxShown > 3 {
+		maxShown = 3
+	}
+	parts := make([]string, 0, maxShown)
+	for i := 0; i < maxShown; i++ {
+		parts = append(parts, shortScriptKey(scriptURLs[i]))
+	}
+	if len(scriptURLs) > maxShown {
+		parts = append(parts, fmt.Sprintf("+%d more", len(scriptURLs)-maxShown))
+	}
+	return strings.Join(parts, ", ")
+}
+
 func main() {
 	setupClientLogging()
 
@@ -103,11 +121,11 @@ func main() {
 	log.Printf("[client] config loaded from %s", *configPath)
 	log.Printf("[client] SOCKS5 proxy: socks5://%s", cfg.ListenAddr)
 	log.Printf("[client] fronting via %s (sni=%s)", cfg.GoogleIP, cfg.SNIHost)
-	log.Printf("[client] script_key: %s", shortScriptKey(cfg.ScriptURL))
+	log.Printf("[client] script_keys: %d (%s)", len(cfg.ScriptURLs), summarizeScriptURLs(cfg.ScriptURLs))
 
 	carr, err := carrier.New(carrier.Config{
-		ScriptURL: cfg.ScriptURL,
-		AESKeyHex: cfg.AESKeyHex,
+		ScriptURLs: cfg.ScriptURLs,
+		AESKeyHex:  cfg.AESKeyHex,
 		Fronting: carrier.FrontingConfig{
 			GoogleIP: cfg.GoogleIP,
 			SNIHost:  cfg.SNIHost,

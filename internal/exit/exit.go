@@ -43,7 +43,7 @@ const (
 
 	// maxDrainFramesPerSession keeps one hot session from dominating an entire
 	// response batch when many interactive sessions are active concurrently.
-	maxDrainFramesPerSession = 4
+	maxDrainFramesPerSession = 8
 
 	// maxDrainFramesPerBatch bounds total frames emitted in one HTTP response so
 	// one poll does not become a very large base64 body under high concurrency.
