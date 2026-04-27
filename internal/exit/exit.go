@@ -320,6 +320,7 @@ func (s *Server) gcDoneSessions() {
 	defer s.mu.Unlock()
 	for id, sess := range s.sessions {
 		if sess.IsDone() {
+			sess.Stop()
 			delete(s.sessions, id)
 		}
 	}

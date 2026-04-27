@@ -48,6 +48,13 @@ type Session struct {
 	// OnTx is invoked when EnqueueTx adds data and when closeReq transitions
 	// true. The carrier sets it to wake its long-poll loop.
 	OnTx func()
+
+	// rxInbox is the per-session inbox for incoming frames. rxLoop drains it
+	// so poll workers are never blocked by a slow SOCKS consumer on one session
+	// holding up frame delivery for all other sessions.
+	rxInbox  chan *frame.Frame
+	rxDone   chan struct{}
+	stopOnce sync.Once
 }
 
 // New creates a session with a random ID is the caller's responsibility — pass
@@ -61,9 +68,34 @@ func New(id [frame.SessionIDLen]byte, target string, needsSYN bool) *Session {
 		rxQueue:   make(map[uint64]*frame.Frame),
 		RxChan:    make(chan []byte, 1024),
 		synNeeded: needsSYN,
+		rxInbox:   make(chan *frame.Frame, 64),
+		rxDone:    make(chan struct{}),
 	}
 	s.txCond = sync.NewCond(&s.mu)
+	go s.rxLoop()
 	return s
+}
+
+// Stop signals the rxLoop goroutine to exit. Must be called after removing the
+// session from the routing table so no new ProcessRx calls can arrive.
+func (s *Session) Stop() {
+	s.stopOnce.Do(func() { close(s.rxDone) })
+}
+
+// rxLoop is a per-session goroutine that delivers frames from rxInbox to RxChan
+// in sequence order. Running it independently from poll workers means a slow
+// SOCKS reader on one session cannot stall frame delivery for any other session.
+func (s *Session) rxLoop() {
+	for {
+		select {
+		case f := <-s.rxInbox:
+			if s.deliverRx(f) {
+				return
+			}
+		case <-s.rxDone:
+			return
+		}
+	}
 }
 
 // EnqueueTx appends bytes to the session's tx buffer. Blocks while the buffer
@@ -233,28 +265,39 @@ func (s *Session) drainTx(maxPayload, maxFrames int) []*frame.Frame {
 	return frames
 }
 
-// ProcessRx delivers an incoming frame to RxChan in seq order. Future-seq
-// frames are buffered; past-seq frames (already delivered) are dropped.
-// FIN closes RxChan after draining all in-order data.
-//
-// Payloads are gathered under the lock and then sent on RxChan after the lock
-// is released, so a slow VirtualConn reader cannot block DrainTx or EnqueueTx.
-// Callers must not invoke ProcessRx concurrently for the same session — the
-// carrier loop and the exit handler both call it serially.
+// ProcessRx enqueues f to the per-session rxLoop goroutine and returns
+// immediately. Callers (poll workers) are never blocked by a slow SOCKS reader
+// on this session, and cannot stall delivery to other sessions as a result.
 func (s *Session) ProcessRx(f *frame.Frame) {
 	s.mu.Lock()
 	if s.rxClosed {
 		s.mu.Unlock()
 		return
 	}
+	s.mu.Unlock()
+	select {
+	case s.rxInbox <- f:
+	case <-s.rxDone:
+	}
+}
+
+// deliverRx performs in-order reassembly and delivers payloads to RxChan.
+// Called exclusively by rxLoop. Returns true when a FIN frame is processed
+// and the session's rx side is done.
+func (s *Session) deliverRx(f *frame.Frame) bool {
+	s.mu.Lock()
+	if s.rxClosed {
+		s.mu.Unlock()
+		return true
+	}
 	if f.Seq < s.rxSeq {
 		s.mu.Unlock()
-		return
+		return false
 	}
 	if f.Seq > s.rxSeq {
 		s.rxQueue[f.Seq] = f
 		s.mu.Unlock()
-		return
+		return false
 	}
 
 	var toSend [][]byte
@@ -283,5 +326,7 @@ func (s *Session) ProcessRx(f *frame.Frame) {
 	}
 	if closeAfter {
 		close(s.RxChan)
+		s.Stop() // unblocks any concurrent ProcessRx call waiting on rxInbox
 	}
+	return closeAfter
 }

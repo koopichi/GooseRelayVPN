@@ -22,6 +22,7 @@ coverage.*
 .idea/
 .vscode/
 *.swp
+deploy.sh
 
 # Misc
 *.token

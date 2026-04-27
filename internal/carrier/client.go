@@ -113,6 +113,7 @@ type Client struct {
 	mu       sync.Mutex
 	sessions map[[frame.SessionIDLen]byte]*session.Session
 	inFlight map[[frame.SessionIDLen]byte]bool
+	txReady  map[[frame.SessionIDLen]byte]struct{} // sessions with pending TX frames
 
 	endpointMu   sync.Mutex
 	endpoints    []relayEndpoint
@@ -155,6 +156,7 @@ func New(cfg Config) (*Client, error) {
 		http:      NewFrontedClient(cfg.Fronting, pollTimeout),
 		sessions:  make(map[[frame.SessionIDLen]byte]*session.Session),
 		inFlight:  make(map[[frame.SessionIDLen]byte]bool),
+		txReady:   make(map[[frame.SessionIDLen]byte]struct{}),
 		endpoints: endpoints,
 		wake:      newWaker(),
 	}, nil
@@ -171,9 +173,15 @@ func (c *Client) NewSession(target string) *session.Session {
 		panic(fmt.Errorf("crypto/rand: %w", err))
 	}
 	s := session.New(id, target, true)
-	s.OnTx = c.kick
+	s.OnTx = func() {
+		c.mu.Lock()
+		c.txReady[id] = struct{}{}
+		c.mu.Unlock()
+		c.kick()
+	}
 	c.mu.Lock()
 	c.sessions[id] = s
+	c.txReady[id] = struct{}{} // SYN is pending immediately on creation
 	c.mu.Unlock()
 	c.kick()
 	return s
@@ -414,18 +422,24 @@ func (c *Client) drainAll() ([]*frame.Frame, [][frame.SessionIDLen]byte) {
 		batchCap = maxDrainFramesPerBatchBusy
 	}
 	remaining := batchCap
-	for id, s := range c.sessions {
+	for id := range c.txReady {
 		if remaining <= 0 {
 			break
 		}
-		if c.inFlight[id] {
+		s, ok := c.sessions[id]
+		if !ok {
+			delete(c.txReady, id)
 			continue
+		}
+		if c.inFlight[id] {
+			continue // already sending; releaseInFlight will re-add if needed
 		}
 		perSessionCap := maxDrainFramesPerSession
 		if remaining < perSessionCap {
 			perSessionCap = remaining
 		}
 		frames := s.DrainTxLimited(MaxFramePayload, perSessionCap)
+		delete(c.txReady, id) // remove now; OnTx re-adds if more data arrives
 		if len(frames) == 0 {
 			continue
 		}
@@ -442,6 +456,11 @@ func (c *Client) releaseInFlight(ids [][frame.SessionIDLen]byte) {
 	defer c.mu.Unlock()
 	for _, id := range ids {
 		delete(c.inFlight, id)
+		// Re-add to txReady if the batch cap left data behind or new data
+		// arrived while this session was in-flight.
+		if s, ok := c.sessions[id]; ok && s.HasPendingTx() {
+			c.txReady[id] = struct{}{}
+		}
 	}
 }
 
@@ -460,7 +479,9 @@ func (c *Client) routeRx(f *frame.Frame) {
 		s.RequestClose()
 		c.mu.Lock()
 		delete(c.sessions, f.SessionID)
+		delete(c.txReady, f.SessionID)
 		c.mu.Unlock()
+		s.Stop()
 		return
 	}
 	s.ProcessRx(f)
@@ -471,7 +492,9 @@ func (c *Client) gcDoneSessions() {
 	defer c.mu.Unlock()
 	for id, s := range c.sessions {
 		if s.IsDone() {
+			s.Stop()
 			delete(c.sessions, id)
+			delete(c.txReady, id)
 		}
 	}
 }
