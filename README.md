@@ -53,7 +53,7 @@ Your application sends TCP bytes through the SOCKS5 listener on your computer. T
 
 ### Step 1: Get an outside-Iran VPS
 
-You need a Linux VPS with a public IP that isn't blocked in Iran. Any provider works — DigitalOcean, Hetzner, Vultr, etc.
+You need a Linux VPS with a public IP. Any provider works — DigitalOcean, Hetzner, Vultr, etc.
 
 ### Step 2: Get the binaries
 
