@@ -45,6 +45,12 @@ const (
 	// improves throughput for video streams under higher RTT links.
 	coalesceWindow = 25 * time.Millisecond
 
+	// coalesceMinFrames is the minimum number of frames in a drain before we
+	// bother waiting coalesceWindow. Batches at or below this threshold are
+	// almost certainly interactive (TLS handshake, HTTP control frames) and
+	// adding 25ms per hop compounds visibly across round-trips.
+	coalesceMinFrames = 4
+
 	// maxDrainFramesPerSession keeps one hot session from dominating an entire
 	// response batch when many interactive sessions are active concurrently.
 	maxDrainFramesPerSession = 8
@@ -148,21 +154,26 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	for {
 		txFrames := s.drainAll()
 		if len(txFrames) > 0 {
-			// Coalesce bursts into one response to reduce per-request overhead.
-			coalesceDeadline := time.Now().Add(coalesceWindow)
-		coalesceLoop:
-			for {
-				if time.Now().After(coalesceDeadline) {
-					break coalesceLoop
-				}
-				remainingCoalesce := time.Until(coalesceDeadline)
-				select {
-				case <-r.Context().Done():
-					return
-				case <-s.activity:
-					txFrames = append(txFrames, s.drainAll()...)
-				case <-time.After(remainingCoalesce):
-					break coalesceLoop
+			// Coalesce bursts into one response to reduce per-request overhead,
+			// but only when the batch is large enough to be bulk/video traffic.
+			// Small batches (≤ coalesceMinFrames) are interactive; adding a
+			// 25ms wait there compounds latency across every TLS round-trip.
+			if len(txFrames) > coalesceMinFrames {
+				coalesceDeadline := time.Now().Add(coalesceWindow)
+			coalesceLoop:
+				for {
+					if time.Now().After(coalesceDeadline) {
+						break coalesceLoop
+					}
+					remainingCoalesce := time.Until(coalesceDeadline)
+					select {
+					case <-r.Context().Done():
+						return
+					case <-s.activity:
+						txFrames = append(txFrames, s.drainAll()...)
+					case <-time.After(remainingCoalesce):
+						break coalesceLoop
+					}
 				}
 			}
 
@@ -223,6 +234,11 @@ func (s *Server) routeIncoming(f *frame.Frame) {
 			return
 		}
 		if s.isDialSuppressed(f.Target) {
+			rst := &frame.Frame{SessionID: f.SessionID, Flags: frame.FlagRST}
+			s.mu.Lock()
+			s.pendingRSTs = append(s.pendingRSTs, rst)
+			s.mu.Unlock()
+			s.kick()
 			return
 		}
 		var err error

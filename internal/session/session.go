@@ -227,7 +227,9 @@ func (s *Session) drainTx(maxPayload, maxFrames int) []*frame.Frame {
 			if n > maxPayload {
 				n = maxPayload
 			}
-			f.Payload = append([]byte(nil), s.txBuf[:n]...)
+			// Zero-copy slice into txBuf. EncodeBatch seals the plaintext before
+			// the next drain, so the backing array is safe to reference here.
+			f.Payload = s.txBuf[:n]
 			s.txBuf = s.txBuf[n:]
 		}
 		frames = append(frames, f)
@@ -242,11 +244,21 @@ func (s *Session) drainTx(maxPayload, maxFrames int) []*frame.Frame {
 		f := &frame.Frame{
 			SessionID: s.ID,
 			Seq:       s.txSeq,
-			Payload:   append([]byte(nil), s.txBuf[:n]...),
+			Payload:   s.txBuf[:n], // zero-copy slice; safe (see SYN comment above)
 		}
 		s.txSeq++
 		s.txBuf = s.txBuf[n:]
 		frames = append(frames, f)
+	}
+
+	// When the buffer is fully drained, nil it so the backing array can be
+	// GC'd. txBuf advances via txBuf[n:] slicing, which keeps the original
+	// large allocation alive even after all data is consumed. Niling releases
+	// the reference; the next EnqueueTx will allocate a fresh slice.
+	// Note: zero-copy Frame.Payload slices above still reference the old
+	// backing array — they keep it alive until EncodeBatch serializes them.
+	if len(s.txBuf) == 0 {
+		s.txBuf = nil
 	}
 
 	// Trailing FIN.

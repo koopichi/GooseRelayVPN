@@ -115,6 +115,12 @@ func EncodeBatch(c *Crypto, frames []*Frame) ([]byte, error) {
 
 // DecodeBatch is the inverse of EncodeBatch. The entire batch is authenticated
 // as a single unit; any corruption causes the whole batch to be rejected.
+//
+// Zero-copy contract: Frame.Payload slices returned here point directly into
+// the plaintext buffer allocated by c.Open. Callers must not modify that buffer.
+// Since c.Open always allocates a fresh slice, this is safe as long as callers
+// treat Frame.Payload as read-only — which session.ProcessRx and upstream.Write
+// both do.
 func DecodeBatch(c *Crypto, body []byte) ([]*Frame, error) {
 	if len(body) == 0 {
 		return nil, nil

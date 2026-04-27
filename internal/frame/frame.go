@@ -101,8 +101,10 @@ func Unmarshal(data []byte) (*Frame, int, error) {
 		return nil, 0, errors.New("frame: short payload")
 	}
 	if plen > 0 {
-		f.Payload = make([]byte, plen)
-		copy(f.Payload, data[off:off+plen])
+		// Zero-copy slice into caller's buffer. Safe when the caller (DecodeBatch)
+		// owns the backing buffer and does not reuse it — which is always the case
+		// since c.Open allocates a fresh plaintext slice on every call.
+		f.Payload = data[off : off+plen]
 	}
 	off += plen
 	return f, off, nil
