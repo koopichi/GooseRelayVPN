@@ -51,7 +51,7 @@ Your application sends TCP bytes through the SOCKS5 listener on your computer. T
 
 ## Step-by-Step Setup Guide
 
-### Step 1: Get an outside-Iran VPS
+### Step 1: Get an VPS
 
 You need a Linux VPS with a public IP. Any provider works.
 
@@ -308,7 +308,6 @@ GooseRelayVPN/
 │   └── Code.gs                     # ~30-line dumb forwarder
 ├── scripts/
 │   ├── gen-key.sh                  # openssl rand -hex 32
-│   ├── deploy.sh                   # Build + scp + systemd install on the VPS
 │   └── goose-relay.service        # systemd unit template
 ├── client_config.example.json
 └── server_config.example.json

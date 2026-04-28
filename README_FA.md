@@ -51,7 +51,7 @@
 
 ## راه‌اندازی مرحله‌به‌مرحله
 
-### مرحله ۱: تهیه‌ی یک VPS خارج از ایران
+### مرحله ۱: تهیه‌ی یک VPS
 
 به یک سرور لینوکسی با IP عمومی نیاز دارید. هر پروایدری کار می‌کند.
 
@@ -308,7 +308,6 @@ GooseRelayVPN/
 │   └── Code.gs                     # forwarder ساده‌ی ~۳۰ خطی
 ├── scripts/
 │   ├── gen-key.sh                  # openssl rand -hex 32
-│   ├── deploy.sh                   # build + scp + نصب systemd روی VPS
 │   └── goose-relay.service        # template برای systemd unit
 ├── client_config.example.json
 └── server_config.example.json
