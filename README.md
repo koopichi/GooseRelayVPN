@@ -319,6 +319,8 @@ What the client does for you automatically:
 
 > 💡 You can paste either just the Deployment ID (the part between `/s/` and `/exec`) or the full `/exec` URL — the client extracts the ID either way.
 
+> ⚠️ **Recommended range: 3–4 deployment IDs.** More is not always better — each key adds 3 concurrent poll workers, and going too high creates unnecessary load on Google's infrastructure without meaningful speed gains. Stick to 3–4 for reliable, stable performance.
+
 ---
 
 ## Configuration
@@ -331,7 +333,7 @@ What the client does for you automatically:
 | `socks_port` | `1080` | Port for the local SOCKS5 listener. |
 | `google_host` | `216.239.38.120` | Google edge IP/host to dial (port is fixed to `443`). |
 | `sni` | `www.google.com` | SNI presented during the TLS handshake. Accepts a single string or an array — `["www.google.com", "mail.google.com", "accounts.google.com"]` — where each SNI host gets its own connection and throttle bucket, which can multiply available bandwidth in regions that rate-limit per domain name. |
-| `script_keys` | — | Array of Apps Script Deployment IDs (no full URL needed). One ID is required; add more to increase both throughput and quota — each additional ID spawns 3 more concurrent poll workers and adds its own ~20,000 req/day quota bucket. |
+| `script_keys` | — | Array of Apps Script Deployment IDs (no full URL needed). One ID is required; add more to increase throughput and quota — each ID spawns 3 concurrent poll workers and adds ~20,000 req/day quota. **Recommended: 3–4 IDs.** Going higher adds load without meaningful gains. |
 | `tunnel_key` | — | 64-char hex AES-256 key. Must match the server byte-for-byte. |
 | `socks_user` | *(optional)* | SOCKS5 username (RFC 1929). When set, clients must authenticate or the connection is rejected. Must be paired with `socks_pass` — set both or neither. |
 | `socks_pass` | *(optional)* | SOCKS5 password paired with `socks_user`. |
